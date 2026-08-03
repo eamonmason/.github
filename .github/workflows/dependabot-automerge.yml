@@ -34,6 +34,28 @@ jobs:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
+      # Required status checks (e.g. CI) run in parallel with this workflow and
+      # may still be pending — merging before they finish is rejected by branch
+      # protection. Wait for them here instead of relying on GitHub's native
+      # auto-merge, since that requires the "Allow auto-merge" repo setting,
+      # which isn't enabled on several repos this workflow runs against.
+      # Repos without branch protection (e.g. private repos on the free plan)
+      # report no required checks at all — `gh pr checks --required` exits 1
+      # with "no required checks reported" in that case, which just means
+      # there's nothing to wait for, so treat it as success.
+      - name: Wait for required checks
+        if: steps.meta.outputs.update-type != 'version-update:semver-major'
+        run: |
+          output=$(gh pr checks "$PR_URL" --watch --required --fail-fast 2>&1)
+          status=$?
+          echo "$output"
+          if [ $status -ne 0 ] && ! grep -q "no required checks reported" <<<"$output"; then
+            exit $status
+          fi
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
       - name: Squash merge
         if: steps.meta.outputs.update-type != 'version-update:semver-major'
         run: gh pr merge --squash "$PR_URL"

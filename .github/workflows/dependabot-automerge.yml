@@ -43,11 +43,17 @@ jobs:
       # report no required checks at all — `gh pr checks --required` exits 1
       # with "no required checks reported" in that case, which just means
       # there's nothing to wait for, so treat it as success.
+      # Capture the exit status via `if`, not a bare assignment: Actions runs
+      # `run:` blocks under `bash -e`, where `output=$(cmd)` inherits cmd's
+      # status and aborts the step before the check below can run.
       - name: Wait for required checks
         if: steps.meta.outputs.update-type != 'version-update:semver-major'
         run: |
-          output=$(gh pr checks "$PR_URL" --watch --required --fail-fast 2>&1)
-          status=$?
+          if output=$(gh pr checks "$PR_URL" --watch --required --fail-fast 2>&1); then
+            status=0
+          else
+            status=$?
+          fi
           echo "$output"
           if [ $status -ne 0 ] && ! grep -q "no required checks reported" <<<"$output"; then
             exit $status

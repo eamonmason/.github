@@ -3,6 +3,11 @@ name: Dependabot Auto-merge (reusable)
 on:
   workflow_call:
 
+# Every privileged step mints its own token from the APP_ID/APP_PRIVATE_KEY
+# GitHub App via actions/create-github-app-token; the default GITHUB_TOKEN
+# is never used and the repo is never checked out, so no permissions needed.
+permissions: {}
+
 jobs:
   automerge:
     runs-on: ubuntu-latest

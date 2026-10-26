@@ -12,6 +12,12 @@ jobs:
   automerge:
     runs-on: ubuntu-latest
     if: github.actor == 'dependabot[bot]'
+    # One run per repo at a time, so two PRs can't race to merge. GitHub keeps
+    # only one *pending* run per group and cancels older pending ones; the
+    # sweep step below recovers any PR dropped that way.
+    concurrency:
+      group: dependabot-automerge-${{ github.repository }}
+      cancel-in-progress: false
     steps:
       - name: Generate app token
         id: app-token
@@ -85,4 +91,35 @@ jobs:
           exit 1
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      # Dependabot only rebases on conflicts, not when a PR is merely behind
+      # the base branch, so after one PR merges its siblings go stale and can't
+      # merge under "require branches to be up to date". Ask Dependabot to
+      # rebase the oldest stale one; its push re-triggers this workflow, which
+      # merges it and sweeps again, so the backlog drains one PR at a time.
+      # `@dependabot rebase` rather than the update-branch API: that adds a
+      # merge commit, after which Dependabot treats the PR as hand-edited and
+      # stops maintaining it. Runs even if the merge step failed, since the
+      # failure may be this very PR being behind.
+      - name: Rebase next stale Dependabot PR
+        if: always() && steps.app-token.outcome == 'success'
+        run: |
+          # mergeStateStatus is UNKNOWN for a few seconds after a merge.
+          for attempt in 1 2 3; do
+            sleep 10
+            prs=$(gh pr list --repo "$REPO" --author "app/dependabot" --state open \
+              --json number,mergeStateStatus,createdAt)
+            if ! grep -q '"UNKNOWN"' <<<"$prs"; then break; fi
+          done
+          next=$(jq -r '[.[] | select(.mergeStateStatus == "BEHIND" or .mergeStateStatus == "DIRTY")]
+            | sort_by(.createdAt) | first | .number // empty' <<<"$prs")
+          if [ -z "$next" ]; then
+            echo "No stale Dependabot PRs."
+            exit 0
+          fi
+          echo "Requesting rebase of #$next"
+          gh pr comment "$next" --repo "$REPO" --body "@dependabot rebase"
+        env:
+          REPO: ${{ github.repository }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}

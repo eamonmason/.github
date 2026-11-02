@@ -6,12 +6,21 @@ on:
 # Every privileged step mints its own token from the APP_ID/APP_PRIVATE_KEY
 # GitHub App via actions/create-github-app-token; the default GITHUB_TOKEN
 # is never used and the repo is never checked out, so no permissions needed.
+# Runs triggered by Dependabot read Dependabot secrets, but runs triggered by
+# the App's own rebase push (see the last step) read Actions secrets, so
+# APP_ID/APP_PRIVATE_KEY must be set in both places in every caller repo.
 permissions: {}
 
 jobs:
   automerge:
     runs-on: ubuntu-latest
-    if: github.actor == 'dependabot[bot]'
+    # Only Dependabot's PRs, and only pushes made by Dependabot itself or by
+    # our App rebasing the branch, so a human push to a Dependabot branch is
+    # never auto-merged.
+    if: >-
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      (github.actor == 'dependabot[bot]' ||
+       github.actor == 'eamonmason-dependabot-bot[bot]')
     # One run per repo at a time, so two PRs can't race to merge. GitHub keeps
     # only one *pending* run per group and cancels older pending ones; the
     # sweep step below recovers any PR dropped that way.
@@ -80,7 +89,7 @@ jobs:
       - name: Squash merge
         if: steps.meta.outputs.update-type != 'version-update:semver-major'
         run: |
-          for attempt in 1 2 3 4 5; do
+          for _ in 1 2 3 4 5; do
             output=$(gh pr merge --squash "$PR_URL" 2>&1) && { echo "$output"; exit 0; }
             echo "$output"
             if ! grep -q "required status checks are expected" <<<"$output"; then
@@ -95,31 +104,36 @@ jobs:
 
       # Dependabot only rebases on conflicts, not when a PR is merely behind
       # the base branch, so after one PR merges its siblings go stale and can't
-      # merge under "require branches to be up to date". Ask Dependabot to
-      # rebase the oldest stale one; its push re-triggers this workflow, which
-      # merges it and sweeps again, so the backlog drains one PR at a time.
-      # `@dependabot rebase` rather than the update-branch API: that adds a
-      # merge commit, after which Dependabot treats the PR as hand-edited and
-      # stops maintaining it. Runs even if the merge step failed, since the
-      # failure may be this very PR being behind.
-      - name: Rebase next stale Dependabot PR
+      # merge under "require branches to be up to date". Rebase the oldest
+      # stale one onto the base branch; the App's push re-triggers this
+      # workflow (hence the App actor in the job `if`), which merges it and
+      # sweeps again, so the backlog drains one PR at a time.
+      # Not `@dependabot rebase`: Dependabot ignores commands from bots and
+      # replies "only users with push access can use that command". Rebase
+      # rather than merge to keep the commit Dependabot-authored, which
+      # fetch-metadata verifies. Dependabot then treats the PR as edited and
+      # stops rebasing it, which is fine since it merges straight away.
+      # Only BEHIND: conflicting (DIRTY) PRs can't be updated this way, and
+      # Dependabot rebases those itself. Runs even if the merge step failed,
+      # since the failure may be this very PR being behind.
+      - name: Update next stale Dependabot PR
         if: always() && steps.app-token.outcome == 'success'
         run: |
           # mergeStateStatus is UNKNOWN for a few seconds after a merge.
-          for attempt in 1 2 3; do
+          for _ in 1 2 3; do
             sleep 10
             prs=$(gh pr list --repo "$REPO" --author "app/dependabot" --state open \
               --json number,mergeStateStatus,createdAt)
             if ! grep -q '"UNKNOWN"' <<<"$prs"; then break; fi
           done
-          next=$(jq -r '[.[] | select(.mergeStateStatus == "BEHIND" or .mergeStateStatus == "DIRTY")]
+          next=$(jq -r '[.[] | select(.mergeStateStatus == "BEHIND")]
             | sort_by(.createdAt) | first | .number // empty' <<<"$prs")
           if [ -z "$next" ]; then
             echo "No stale Dependabot PRs."
             exit 0
           fi
-          echo "Requesting rebase of #$next"
-          gh pr comment "$next" --repo "$REPO" --body "@dependabot rebase"
+          echo "Requesting update of #$next"
+          gh pr update-branch "$next" --repo "$REPO" --rebase
         env:
           REPO: ${{ github.repository }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}

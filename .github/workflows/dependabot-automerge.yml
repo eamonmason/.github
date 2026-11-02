@@ -40,6 +40,10 @@ jobs:
         uses: dependabot/fetch-metadata@v3
         with:
           github-token: ${{ steps.app-token.outputs.token }}
+          # A GitHub-side rebase (see the last step) leaves the commit
+          # Dependabot-authored but unsigned, so skip only the signature check
+          # on runs triggered by our App; PR and commit author are still checked.
+          skip-commit-verification: ${{ github.actor == 'eamonmason-dependabot-bot[bot]' }}
 
       # Skip major version bumps — those need a human eye
       - name: Skip major updates

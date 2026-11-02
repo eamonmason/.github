@@ -7,7 +7,7 @@ on:
 # GitHub App via actions/create-github-app-token; the default GITHUB_TOKEN
 # is never used and the repo is never checked out, so no permissions needed.
 # Runs triggered by Dependabot read Dependabot secrets, but runs triggered by
-# the App's own rebase push (see the last step) read Actions secrets, so
+# the App's own branch-update push (see the last step) read Actions secrets, so
 # APP_ID/APP_PRIVATE_KEY must be set in both places in every caller repo.
 permissions: {}
 
@@ -40,10 +40,6 @@ jobs:
         uses: dependabot/fetch-metadata@v3
         with:
           github-token: ${{ steps.app-token.outputs.token }}
-          # A GitHub-side rebase (see the last step) leaves the commit
-          # Dependabot-authored but unsigned, so skip only the signature check
-          # on runs triggered by our App; PR and commit author are still checked.
-          skip-commit-verification: ${{ github.actor == 'eamonmason-dependabot-bot[bot]' }}
 
       # Skip major version bumps — those need a human eye
       - name: Skip major updates
@@ -108,15 +104,19 @@ jobs:
 
       # Dependabot only rebases on conflicts, not when a PR is merely behind
       # the base branch, so after one PR merges its siblings go stale and can't
-      # merge under "require branches to be up to date". Rebase the oldest
-      # stale one onto the base branch; the App's push re-triggers this
+      # merge under "require branches to be up to date". Merge the base branch
+      # into the oldest stale one; the App's push re-triggers this
       # workflow (hence the App actor in the job `if`), which merges it and
       # sweeps again, so the backlog drains one PR at a time.
       # Not `@dependabot rebase`: Dependabot ignores commands from bots and
-      # replies "only users with push access can use that command". Rebase
-      # rather than merge to keep the commit Dependabot-authored, which
-      # fetch-metadata verifies. Dependabot then treats the PR as edited and
-      # stops rebasing it, which is fine since it merges straight away.
+      # replies "only users with push access can use that command". Merge, not
+      # --rebase: a GitHub-side rebase rewrites Dependabot's commit unsigned,
+      # which fails fetch-metadata's signature check and "require signed
+      # commits" protection. The merge commit is signed by GitHub, and
+      # Dependabot's original signed commit stays first, which is the one
+      # fetch-metadata checks; the squash merge drops it from history anyway.
+      # Dependabot then treats the PR as edited and stops rebasing it, which
+      # is fine since it merges straight away.
       # Only BEHIND: conflicting (DIRTY) PRs can't be updated this way, and
       # Dependabot rebases those itself. Runs even if the merge step failed,
       # since the failure may be this very PR being behind.
@@ -137,7 +137,7 @@ jobs:
             exit 0
           fi
           echo "Requesting update of #$next"
-          gh pr update-branch "$next" --repo "$REPO" --rebase
+          gh pr update-branch "$next" --repo "$REPO"
         env:
           REPO: ${{ github.repository }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}

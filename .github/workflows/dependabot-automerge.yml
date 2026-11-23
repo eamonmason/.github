@@ -61,12 +61,17 @@ jobs:
       # which isn't enabled on several repos this workflow runs against.
       # Repos without branch protection (e.g. private repos on the free plan)
       # report no required checks at all — `gh pr checks --required` exits 1
-      # with "no required checks reported" in that case, which just means
-      # there's nothing to wait for, so treat it as success.
+      # with "no required checks reported". Nothing would stop a broken bump
+      # merging (and deploying, where main deploys on push), so in that case
+      # wait for every check on the PR instead and refuse to merge if any
+      # fails or is cancelled. This job's own check is excluded by matching
+      # its run ID in the check link (else it would wait on itself). Checks
+      # can take a few seconds to register, so "no checks at all" is only
+      # trusted after a grace period.
       # Capture the exit status via `if`, not a bare assignment: Actions runs
       # `run:` blocks under `bash -e`, where `output=$(cmd)` inherits cmd's
       # status and aborts the step before the check below can run.
-      - name: Wait for required checks
+      - name: Wait for checks
         if: steps.meta.outputs.update-type != 'version-update:semver-major'
         run: |
           if output=$(gh pr checks "$PR_URL" --watch --required --fail-fast 2>&1); then
@@ -75,12 +80,43 @@ jobs:
             status=$?
           fi
           echo "$output"
-          if [ $status -ne 0 ] && ! grep -q "no required checks reported" <<<"$output"; then
+          if [ $status -eq 0 ]; then exit 0; fi
+          if ! grep -q "no required checks reported" <<<"$output"; then
             exit $status
           fi
+
+          echo "No required checks; waiting for all checks except this run ($RUN_ID)."
+          start=$(date +%s)
+          while :; do
+            elapsed=$(( $(date +%s) - start ))
+            # Exits non-zero while checks are pending/failing; the JSON is still printed.
+            checks=$(gh pr checks "$PR_URL" --json name,bucket,link 2>/dev/null || true)
+            others=$(jq -c --arg run "/runs/$RUN_ID/" \
+              '[.[]? | select((.link // "") | contains($run) | not)]' <<<"${checks:-[]}")
+            total=$(jq length <<<"$others")
+            failed=$(jq -r '.[] | select(.bucket == "fail" or .bucket == "cancel") | "\(.name) (\(.bucket))"' <<<"$others")
+            pending=$(jq '[.[] | select(.bucket == "pending")] | length' <<<"$others")
+            if [ -n "$failed" ]; then
+              echo "Not merging; failed checks:"; echo "$failed"; exit 1
+            fi
+            if [ "$total" -gt 0 ] && [ "$pending" -eq 0 ]; then
+              echo "All $total checks passed or skipped."; exit 0
+            fi
+            if [ "$total" -eq 0 ] && [ "$elapsed" -ge "$GRACE" ]; then
+              echo "No checks registered after ${GRACE}s; nothing to wait for."; exit 0
+            fi
+            if [ "$elapsed" -ge "$TIMEOUT" ]; then
+              echo "Timed out after ${TIMEOUT}s with $pending checks pending."; exit 1
+            fi
+            echo "${elapsed}s: $pending of $total checks pending"
+            sleep 20
+          done
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RUN_ID: ${{ github.run_id }}
+          GRACE: 90
+          TIMEOUT: 3600
 
       # GitHub's merge-eligibility cache can lag a few seconds behind the checks
       # API even after `gh pr checks --watch` reports everything passing, which
